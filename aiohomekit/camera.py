@@ -15,6 +15,7 @@ media packets is layered on top of the session it returns.
 """
 from __future__ import annotations
 
+import base64
 import os
 from dataclasses import dataclass, field
 
@@ -75,17 +76,55 @@ def _new_srtp() -> SRTPParameters:
     )
 
 
+# libsrtp / ffmpeg name for each HAP crypto suite.
+_SRTP_SUITE_NAME = {
+    SRTPCryptoSuiteValues.AES_CM_128_HMAC_SHA1_80: "AES_CM_128_HMAC_SHA1_80",
+    SRTPCryptoSuiteValues.AES_256_CM_HMAC_SHA1_80: "AES_256_CM_HMAC_SHA1_80",
+}
+
+
 @dataclass
 class StreamSession:
-    """A negotiated streaming session with a paired camera."""
+    """A negotiated streaming session with a paired camera.
+
+    Each endpoint encrypts with its own keys and announces them during Setup
+    Endpoints: the accessory's downstream media uses the keys it returned in
+    the response, so those are what decrypts the video and audio we receive.
+    The keys we sent in the request are for the talk-back we encrypt to it.
+    """
 
     session_id: bytes
     accessory_address: RTPEndpointAddress
+    local_video_port: int
+    local_audio_port: int
     video_ssrc: int
     audio_ssrc: int
     controller_video_srtp: SRTPParameters
     controller_audio_srtp: SRTPParameters
+    accessory_video_srtp: SRTPParameters = field(repr=False)
+    accessory_audio_srtp: SRTPParameters = field(repr=False)
     selected: SelectedRTPStreamConfiguration = field(repr=False)
+
+    def video_sdp(self, local_ip: str) -> str:
+        """SDP describing the accessory's H264 video for an SRTP consumer.
+
+        Feed it to ffmpeg (-protocol_whitelist file,crypto,data,rtp,udp,srtp)
+        and libsrtp decrypts with the accessory's keys named in the response.
+        """
+        srtp = self.accessory_video_srtp
+        suite = _SRTP_SUITE_NAME[srtp.crypto_suite]
+        inline = base64.b64encode(srtp.master_key + srtp.master_salt).decode("ascii")
+        return (
+            "v=0\r\n"
+            f"o=- 0 0 IN IP4 {local_ip}\r\n"
+            "s=HomeKit\r\n"
+            f"c=IN IP4 {local_ip}\r\n"
+            "t=0 0\r\n"
+            f"m=video {self.local_video_port} RTP/SAVP 99\r\n"
+            "a=rtpmap:99 H264/90000\r\n"
+            "a=fmtp:99 packetization-mode=1\r\n"
+            f"a=crypto:1 {suite} inline:{inline}\r\n"
+        )
 
 
 class CameraStream:
@@ -105,13 +144,10 @@ class CameraStream:
         value = result[(self.aid, iid)].get("value")
         if value is None:
             return None
-        import base64
 
         return struct_cls.decode(base64.b64decode(value))
 
     async def _write_struct(self, name: str, struct) -> None:
-        import base64
-
         iid = self.iids[name]
         value = base64.b64encode(struct.encode()).decode("ascii")
         result = await self.pairing.put_characteristics([(self.aid, iid, value)])
@@ -175,10 +211,14 @@ class CameraStream:
         return StreamSession(
             session_id=session_id,
             accessory_address=response.accessory_address,
+            local_video_port=video_port,
+            local_audio_port=audio_port,
             video_ssrc=response.video_ssrc,
             audio_ssrc=response.audio_ssrc,
             controller_video_srtp=video_srtp,
             controller_audio_srtp=audio_srtp,
+            accessory_video_srtp=response.video_srtp,
+            accessory_audio_srtp=response.audio_srtp,
             selected=selected,
         )
 

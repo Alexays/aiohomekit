@@ -117,3 +117,48 @@ async def test_stop_ends_session():
 def test_missing_iids_rejected():
     with pytest.raises(ValueError):
         CameraStream(FakePairing(), AID, {"streaming_status": 1})
+
+
+def test_stream_session_video_sdp():
+    """video_sdp uses the accessory's response keys and our local port."""
+    import base64
+    from aiohomekit.camera import StreamSession
+    from aiohomekit.model.characteristics.const import SRTPCryptoSuiteValues
+    from aiohomekit.model.characteristics.structs import (
+        RTPEndpointAddress,
+        SelectedRTPStreamConfiguration,
+        SRTPParameters,
+    )
+
+    acc = SRTPParameters(
+        crypto_suite=SRTPCryptoSuiteValues.AES_CM_128_HMAC_SHA1_80,
+        master_key=bytes(range(16)),
+        master_salt=bytes(range(14)),
+    )
+    ctrl = SRTPParameters(
+        crypto_suite=SRTPCryptoSuiteValues.AES_CM_128_HMAC_SHA1_80,
+        master_key=bytes(range(16, 32)),
+        master_salt=bytes(range(14, 28)),
+    )
+    session = StreamSession(
+        session_id=b"\x00" * 16,
+        accessory_address=RTPEndpointAddress(
+            ip_version=0, ip_address="192.0.2.26", video_rtp_port=5000, audio_rtp_port=5002
+        ),
+        local_video_port=63314,
+        local_audio_port=63316,
+        video_ssrc=1,
+        audio_ssrc=2,
+        controller_video_srtp=ctrl,
+        controller_audio_srtp=ctrl,
+        accessory_video_srtp=acc,
+        accessory_audio_srtp=acc,
+        selected=SelectedRTPStreamConfiguration(control=None, video_params=None, audio_params=None),
+    )
+    sdp = session.video_sdp("192.0.2.104")
+    assert "m=video 63314 RTP/SAVP 99" in sdp
+    assert "c=IN IP4 192.0.2.104" in sdp
+    inline = base64.b64encode(acc.master_key + acc.master_salt).decode()
+    assert f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{inline}" in sdp
+    # the controller keys are for talk-back, never the receive SDP
+    assert base64.b64encode(ctrl.master_key + ctrl.master_salt).decode() not in sdp
