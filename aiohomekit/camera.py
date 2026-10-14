@@ -20,15 +20,23 @@ from dataclasses import dataclass, field
 
 from aiohomekit.model.characteristics.const import (
     AudioCodecValues,
+    CVOEnabledValues,
+    PacketizationModeValues,
+    ProfileIDValues,
+    ProfileSupportLevelValues,
     IPVersionValues,
     SampleRateValues,
     SessionControlCommandValues,
     SetupEndpointStatusValues,
     SRTPCryptoSuiteValues,
     StreamingStatusValues,
+    VideoCodecTypeValues,
 )
 from aiohomekit.model.characteristics.structs import (
     AudioCodecParameters,
+    AudioRTPParameters,
+    VideoAttrs,
+    VideoCodecParameters,
     RTPEndpointAddress,
     SelectedAudioParameters,
     SelectedRTPStreamConfiguration,
@@ -106,7 +114,9 @@ class CameraStream:
 
         iid = self.iids[name]
         value = base64.b64encode(struct.encode()).decode("ascii")
-        await self.pairing.put_characteristics([(self.aid, iid, value)])
+        result = await self.pairing.put_characteristics([(self.aid, iid, value)])
+        if result:
+            raise RuntimeError(f"write to {name} (iid {iid}) failed: {result}")
 
     async def streaming_status(self) -> StreamingStatusValues | None:
         status = await self._read_struct("streaming_status", StreamingStatus)
@@ -127,6 +137,7 @@ class CameraStream:
         width: int | None = None,
         height: int | None = None,
         fps: int | None = None,
+        audio: bool = True,
     ) -> StreamSession:
         """Offer our endpoints, then ask the camera to start sending."""
         video_cfg = await self.supported_video()
@@ -157,7 +168,7 @@ class CameraStream:
             raise RuntimeError(f"camera refused Setup Endpoints: {response.status!r}")
 
         selected = self._build_selected(
-            session_id, video_cfg, audio_cfg, video_srtp, audio_srtp, response, width, height, fps
+            session_id, video_cfg, audio_cfg if audio else None, video_srtp, audio_srtp, response, width, height, fps
         )
         await self._write_struct("selected_rtp", selected)
 
@@ -186,17 +197,30 @@ class CameraStream:
         self, session_id, video_cfg, audio_cfg, video_srtp, audio_srtp, response, width, height, fps
     ) -> SelectedRTPStreamConfiguration:
         vconf = video_cfg.config[0]
-        attrs = vconf.video_attrs[0]
-        for candidate in vconf.video_attrs:
-            if candidate.width == width and candidate.height == height:
-                attrs = candidate
-                break
+        # The camera may split resolutions across several config entries; gather them all.
+        all_attrs = [a for cfg in video_cfg.config for a in (cfg.video_attrs or [])]
+        attrs = next((a for a in all_attrs if a.width == width and a.height == height), None)
+        if attrs is None:
+            attrs = all_attrs[0] if all_attrs else VideoAttrs(width=1280, height=720, fps=30)
         if width and height:
-            attrs = type(attrs)(width=width, height=height, fps=fps or attrs.fps)
+            attrs = VideoAttrs(width=width, height=height, fps=fps or attrs.fps)
+
+        # Pick a profile/level the camera listed, but always send a fully specified
+        # codec parameter set (profile, level, packetization) or the accessory rejects it.
+        listed = [cp for cfg in video_cfg.config for cp in (cfg.codec_params or [])]
+        profile = next((cp.profile_id for cp in listed if cp.profile_id is not None), ProfileIDValues.MAIN_PROFILE)
+        level = next((cp.level for cp in listed if cp.level is not None), ProfileSupportLevelValues.THREE_ONE)
+        codec_params = VideoCodecParameters(
+            profile_id=profile,
+            level=level,
+            packetization_mode=PacketizationModeValues.NON_INTERLEAVED_MODE,
+            cvo_enabled=CVOEnabledValues.NOT_SUPPORTED,
+            cvo_id=None,
+        )
 
         video_params = SelectedVideoParameters(
-            codec_type=vconf.codec_type,
-            codec_parameters=vconf.codec_params[0],
+            codec_type=vconf.codec_type if vconf.codec_type is not None else VideoCodecTypeValues.H264,
+            codec_parameters=codec_params,
             video_attrs=attrs,
             rtp_params=VideoRTPParameters(
                 payload_type=99,
@@ -210,14 +234,23 @@ class CameraStream:
         audio_params = None
         if audio_cfg and audio_cfg.config:
             aconf = audio_cfg.config[0]
-            codec = aconf.codec
-            params = aconf.parameters[0] if aconf.parameters else AudioCodecParameters(
-                audio_channels=1, bit_rate=0, sample_rate=SampleRateValues.TWENTY_FOUR_KHZ, rtp_time=20
+            src = aconf.parameters[0] if aconf.parameters else None
+            params = AudioCodecParameters(
+                audio_channels=src.audio_channels if src and src.audio_channels else 1,
+                bit_rate=src.bit_rate if src and src.bit_rate is not None else 0,
+                sample_rate=src.sample_rate if src and src.sample_rate is not None else SampleRateValues.SIXTEEN_KHZ,
+                rtp_time=src.rtp_time if src and src.rtp_time else 30,
             )
             audio_params = SelectedAudioParameters(
-                codec_type=codec if codec is not None else AudioCodecValues.OPUS,
+                codec_type=aconf.codec if aconf.codec is not None else AudioCodecValues.AAC_ELD,
                 codec_parameters=params,
-                rtp_params=None,
+                rtp_params=AudioRTPParameters(
+                    payload_type=110,
+                    ssrc=int.from_bytes(os.urandom(4), "little"),
+                    max_bitrate=24,
+                    min_rtcp_interval=5.0,
+                    comfort_noise_payload_type=13,
+                ),
                 comfort_noise=0,
             )
 
