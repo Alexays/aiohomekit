@@ -76,6 +76,21 @@ def _new_srtp() -> SRTPParameters:
     )
 
 
+# HAP sample rate -> (Hz, MPEG-4 sampling frequency index).
+_SAMPLE_RATES = {
+    SampleRateValues.EIGHT_KHZ: (8000, 11),
+    SampleRateValues.SIXTEEN_KHZ: (16000, 8),
+    SampleRateValues.TWENTY_FOUR_KHZ: (24000, 6),
+}
+
+
+def _aac_eld_config(sample_rate_index: int, channels: int) -> str:
+    """AudioSpecificConfig for HomeKit AAC-ELD: 480-sample frames, no SBR."""
+    # AOT 39 is escaped (31, then 39 - 32), frameLengthFlag=1 selects 480 samples.
+    bits = f"11111{7:06b}{sample_rate_index:04b}{channels:04b}1" + "0" * 8
+    return f"{int(bits, 2) << (32 - len(bits)):08X}"
+
+
 # libsrtp / ffmpeg name for each HAP crypto suite.
 _SRTP_SUITE_NAME = {
     SRTPCryptoSuiteValues.AES_CM_128_HMAC_SHA1_80: "AES_CM_128_HMAC_SHA1_80",
@@ -105,26 +120,43 @@ class StreamSession:
     accessory_audio_srtp: SRTPParameters = field(repr=False)
     selected: SelectedRTPStreamConfiguration = field(repr=False)
 
-    def video_sdp(self, local_ip: str) -> str:
-        """SDP describing the accessory's H264 video for an SRTP consumer.
+    def sdp(self, address: str, video_port: int | None = None, audio_port: int | None = None) -> str:
+        """SDP describing the accessory's media for an SRTP consumer such as ffmpeg.
 
-        Feed it to ffmpeg (-protocol_whitelist file,crypto,data,rtp,udp,srtp)
-        and libsrtp decrypts with the accessory's keys named in the response.
+        The ports default to the ones offered to the accessory; pass others when
+        the packets are relayed. Audio is included when AAC-ELD was negotiated.
+        Feed it to ffmpeg (-protocol_whitelist file,crypto,data,rtp,udp,srtp).
         """
-        srtp = self.accessory_video_srtp
-        suite = _SRTP_SUITE_NAME[srtp.crypto_suite]
-        inline = base64.b64encode(srtp.master_key + srtp.master_salt).decode("ascii")
-        return (
+        video = self.selected.video_params
+        audio = self.selected.audio_params
+        sdp = (
             "v=0\r\n"
-            f"o=- 0 0 IN IP4 {local_ip}\r\n"
+            f"o=- 0 0 IN IP4 {address}\r\n"
             "s=HomeKit\r\n"
-            f"c=IN IP4 {local_ip}\r\n"
+            f"c=IN IP4 {address}\r\n"
             "t=0 0\r\n"
-            f"m=video {self.local_video_port} RTP/SAVP 99\r\n"
-            "a=rtpmap:99 H264/90000\r\n"
-            "a=fmtp:99 packetization-mode=1\r\n"
-            f"a=crypto:1 {suite} inline:{inline}\r\n"
+            f"m=video {video_port or self.local_video_port} RTP/SAVP {video.rtp_params.payload_type}\r\n"
+            f"a=rtpmap:{video.rtp_params.payload_type} H264/90000\r\n"
+            f"a=fmtp:{video.rtp_params.payload_type} packetization-mode=1\r\n"
+            f"{_sdp_crypto(self.accessory_video_srtp)}"
         )
+        if audio and audio.codec_type == AudioCodecValues.AAC_ELD:
+            params = audio.codec_parameters
+            hz, index = _SAMPLE_RATES[params.sample_rate]
+            pt = audio.rtp_params.payload_type
+            sdp += (
+                f"m=audio {audio_port or self.local_audio_port} RTP/SAVP {pt}\r\n"
+                f"a=rtpmap:{pt} mpeg4-generic/{hz}/{params.audio_channels}\r\n"
+                f"a=fmtp:{pt} profile-level-id=1;mode=AAC-hbr;sizelength=13;indexlength=3;indexdeltalength=3;"
+                f"config={_aac_eld_config(index, params.audio_channels)}\r\n"
+                f"{_sdp_crypto(self.accessory_audio_srtp)}"
+            )
+        return sdp
+
+
+def _sdp_crypto(srtp: SRTPParameters) -> str:
+    inline = base64.b64encode(srtp.master_key + srtp.master_salt).decode("ascii")
+    return f"a=crypto:1 {_SRTP_SUITE_NAME[srtp.crypto_suite]} inline:{inline}\r\n"
 
 
 class CameraStream:
@@ -174,6 +206,7 @@ class CameraStream:
         height: int | None = None,
         fps: int | None = None,
         audio: bool = True,
+        max_bitrate: int = 800,
     ) -> StreamSession:
         """Offer our endpoints, then ask the camera to start sending."""
         video_cfg = await self.supported_video()
@@ -204,7 +237,8 @@ class CameraStream:
             raise RuntimeError(f"camera refused Setup Endpoints: {response.status!r}")
 
         selected = self._build_selected(
-            session_id, video_cfg, audio_cfg if audio else None, video_srtp, audio_srtp, response, width, height, fps
+            session_id, video_cfg, audio_cfg if audio else None, video_srtp, audio_srtp, response,
+            width, height, fps, max_bitrate,
         )
         await self._write_struct("selected_rtp", selected)
 
@@ -234,7 +268,7 @@ class CameraStream:
         await self._write_struct("selected_rtp", end)
 
     def _build_selected(
-        self, session_id, video_cfg, audio_cfg, video_srtp, audio_srtp, response, width, height, fps
+        self, session_id, video_cfg, audio_cfg, video_srtp, audio_srtp, response, width, height, fps, max_bitrate
     ) -> SelectedRTPStreamConfiguration:
         vconf = video_cfg.config[0]
         # The camera may split resolutions across several config entries; gather them all.
@@ -265,7 +299,7 @@ class CameraStream:
             rtp_params=VideoRTPParameters(
                 payload_type=99,
                 ssrc=response.video_ssrc or int.from_bytes(os.urandom(4), "little"),
-                max_bitrate=800,
+                max_bitrate=max_bitrate,
                 min_rtcp_interval=0.5,
                 max_mtu=1378,
             ),

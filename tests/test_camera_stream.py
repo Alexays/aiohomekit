@@ -83,7 +83,7 @@ async def test_start_negotiates_and_starts():
     pairing = FakePairing()
     cam = CameraStream(pairing, AID, IIDS)
     session = await cam.start(local_ip="192.0.2.35", video_port=50000, audio_port=50002,
-                              width=1280, height=720, fps=30)
+                              width=1280, height=720, fps=30, max_bitrate=2000)
 
     assert session.accessory_address.ip_address == "192.0.2.26"
     assert session.video_ssrc == 0x11223344
@@ -98,6 +98,7 @@ async def test_start_negotiates_and_starts():
     assert sel.control.command == SessionControlCommandValues.START_SESSION
     assert sel.video_params.video_attrs.width == 1280
     assert sel.video_params.video_attrs.height == 720
+    assert sel.video_params.rtp_params.max_bitrate == 2000
     assert sel.audio_params is not None
 
 
@@ -119,46 +120,34 @@ def test_missing_iids_rejected():
         CameraStream(FakePairing(), AID, {"streaming_status": 1})
 
 
-def test_stream_session_video_sdp():
-    """video_sdp uses the accessory's response keys and our local port."""
-    import base64
-    from aiohomekit.camera import StreamSession
-    from aiohomekit.model.characteristics.const import SRTPCryptoSuiteValues
-    from aiohomekit.model.characteristics.structs import (
-        RTPEndpointAddress,
-        SelectedRTPStreamConfiguration,
-        SRTPParameters,
-    )
+@pytest.mark.asyncio
+async def test_sdp_uses_accessory_keys_and_relay_ports():
+    """The receive SDP decrypts with the accessory's response keys, never ours."""
+    pairing = FakePairing()
+    pairing.values[IIDS["supported_audio"]] = b64(SupportedAudioStreamConfiguration(config=[AudioCodecConfiguration(
+        codec=AudioCodecValues.AAC_ELD,
+        parameters=[AudioCodecParameters(audio_channels=1, bit_rate=BitRateValues.VARIABLE,
+                                         sample_rate=SampleRateValues.SIXTEEN_KHZ, rtp_time=30)])],
+        comfort_noise=0))
+    session = await CameraStream(pairing, AID, IIDS).start(local_ip="192.0.2.35", video_port=50000, audio_port=50002)
 
-    acc = SRTPParameters(
-        crypto_suite=SRTPCryptoSuiteValues.AES_CM_128_HMAC_SHA1_80,
-        master_key=bytes(range(16)),
-        master_salt=bytes(range(14)),
-    )
-    ctrl = SRTPParameters(
-        crypto_suite=SRTPCryptoSuiteValues.AES_CM_128_HMAC_SHA1_80,
-        master_key=bytes(range(16, 32)),
-        master_salt=bytes(range(14, 28)),
-    )
-    session = StreamSession(
-        session_id=b"\x00" * 16,
-        accessory_address=RTPEndpointAddress(
-            ip_version=0, ip_address="192.0.2.26", video_rtp_port=5000, audio_rtp_port=5002
-        ),
-        local_video_port=63314,
-        local_audio_port=63316,
-        video_ssrc=1,
-        audio_ssrc=2,
-        controller_video_srtp=ctrl,
-        controller_audio_srtp=ctrl,
-        accessory_video_srtp=acc,
-        accessory_audio_srtp=acc,
-        selected=SelectedRTPStreamConfiguration(control=None, video_params=None, audio_params=None),
-    )
-    sdp = session.video_sdp("192.0.2.104")
-    assert "m=video 63314 RTP/SAVP 99" in sdp
-    assert "c=IN IP4 192.0.2.104" in sdp
-    inline = base64.b64encode(acc.master_key + acc.master_salt).decode()
-    assert f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{inline}" in sdp
-    # the controller keys are for talk-back, never the receive SDP
-    assert base64.b64encode(ctrl.master_key + ctrl.master_salt).decode() not in sdp
+    sdp = session.sdp("127.0.0.1", video_port=41000, audio_port=41002)
+
+    assert "c=IN IP4 127.0.0.1" in sdp
+    assert "m=video 41000 RTP/SAVP 99" in sdp
+    assert "m=audio 41002 RTP/SAVP 110" in sdp
+    assert "a=rtpmap:110 mpeg4-generic/16000/1" in sdp
+    assert "config=F8F03000" in sdp  # what fdk-aac reports for 16 kHz mono ELD with 480-sample frames
+    acc = accessory_response()
+    for srtp in (acc.video_srtp, acc.audio_srtp):
+        assert base64.b64encode(srtp.master_key + srtp.master_salt).decode() in sdp
+    for srtp in (session.controller_video_srtp, session.controller_audio_srtp):
+        assert base64.b64encode(srtp.master_key + srtp.master_salt).decode() not in sdp
+
+
+@pytest.mark.asyncio
+async def test_sdp_defaults_to_offered_ports_and_skips_non_eld_audio():
+    session = await CameraStream(FakePairing(), AID, IIDS).start(local_ip="192.0.2.35", video_port=50000, audio_port=50002)
+    sdp = session.sdp("192.0.2.35")
+    assert "m=video 50000 RTP/SAVP 99" in sdp
+    assert "m=audio" not in sdp  # the default fixture negotiates Opus
