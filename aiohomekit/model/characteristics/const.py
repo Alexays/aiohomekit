@@ -258,6 +258,21 @@ class SampleRateValues(enum.IntEnum):
     TWENTY_FOUR_KHZ = 2
 
 
+class IPVersionValues(enum.IntEnum):
+    """Address family of an RTP endpoint (SetupEndpoints)."""
+
+    IPV4 = 0
+    IPV6 = 1
+
+
+class SetupEndpointStatusValues(enum.IntEnum):
+    """Result of a SetupEndpoints write, returned by the accessory."""
+
+    SUCCESS = 0
+    BUSY = 1
+    ERROR = 2
+
+
 class SRTPCryptoSuiteValues(enum.IntEnum):
     AES_CM_128_HMAC_SHA1_80 = 0
     AES_256_CM_HMAC_SHA1_80 = 1

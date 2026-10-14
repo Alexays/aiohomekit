@@ -26,7 +26,9 @@ from .const import (
     ProfileIDValues,
     ProfileSupportLevelValues,
     SampleRateValues,
+    IPVersionValues,
     SessionControlCommandValues,
+    SetupEndpointStatusValues,
     SRTPCryptoSuiteValues,
     StreamingStatusValues,
     VideoCodecTypeValues,
@@ -156,3 +158,57 @@ class SelectedRTPStreamConfiguration(TLVStruct):
     control: SessionControl = tlv_entry(1)
     video_params: SelectedVideoParameters = tlv_entry(2)
     audio_params: SelectedAudioParameters = tlv_entry(3)
+
+
+@dataclass
+class RTPEndpointAddress(TLVStruct):
+    """An IP endpoint (address + RTP ports) for one side of a stream."""
+
+    ip_version: IPVersionValues = tlv_entry(1)
+    ip_address: str = tlv_entry(2)
+    video_rtp_port: u16 = tlv_entry(3)
+    audio_rtp_port: u16 = tlv_entry(4)
+
+
+@dataclass
+class SRTPParameters(TLVStruct):
+    """SRTP crypto suite and keys for one media stream."""
+
+    crypto_suite: SRTPCryptoSuiteValues = tlv_entry(1)
+    master_key: bytes = tlv_entry(2)
+    master_salt: bytes = tlv_entry(3)
+
+
+@dataclass
+class SetupEndpointsRequest(TLVStruct):
+    """
+    Written by the controller to Setup Endpoints to offer its receive
+    endpoints and SRTP keys before a stream starts.
+
+    UUID 00000118-0000-1000-8000-0026BB765291
+    Type public.hap.characteristic.setup-endpoints
+    """
+
+    session_id: bytes = tlv_entry(1)
+    controller_address: RTPEndpointAddress = tlv_entry(3)
+    video_srtp: SRTPParameters = tlv_entry(4)
+    audio_srtp: SRTPParameters = tlv_entry(5)
+
+
+@dataclass
+class SetupEndpointsResponse(TLVStruct):
+    """
+    Read back from Setup Endpoints: the accessory's own endpoints, keys
+    and SSRCs, plus the status of the request.
+
+    UUID 00000118-0000-1000-8000-0026BB765291
+    Type public.hap.characteristic.setup-endpoints
+    """
+
+    session_id: bytes = tlv_entry(1)
+    status: SetupEndpointStatusValues = tlv_entry(2)
+    accessory_address: RTPEndpointAddress = tlv_entry(3)
+    video_srtp: SRTPParameters = tlv_entry(4)
+    audio_srtp: SRTPParameters = tlv_entry(5)
+    video_ssrc: u32 = tlv_entry(6)
+    audio_ssrc: u32 = tlv_entry(7)
