@@ -3,6 +3,7 @@
 from .const import TemperatureDisplayUnits, ThreadNodeCapabilities, ThreadStatus
 from .structs import (
     SelectedRTPStreamConfiguration,
+    SetupEndpointsResponse,
     StreamingStatus,
     SupportedAudioStreamConfiguration,
     SupportedRTPConfiguration,
@@ -673,6 +674,7 @@ characteristics = {
         "description": "Setup Endpoints",
         "perms": ["pr", "pw"],
         "format": "tlv8",
+        "struct": SetupEndpointsResponse,
     },
     "000000C0-0000-1000-8000-0026BB765291": {
         "name": "SLAT_TYPE",

@@ -133,6 +133,10 @@ def deserialize_bytes(value_type: type, value: bytes) -> bytes:
     return value
 
 
+def deserialize_float(value_type: type, value: bytes) -> float:
+    return struct.unpack("<f", value)[0]
+
+
 def deserialize_int_enum(value_type: type, value: bytes) -> enum.IntEnum:
     int_value = deserialize_u8(value_type, value)
     return value_type(int_value)
@@ -183,6 +187,10 @@ def serialize_str(value_type: type, value: str) -> bytes:
 
 def serialize_bytes(value_type: type, value: bytes) -> bytes:
     return value
+
+
+def serialize_float(value_type: type, value: float) -> bytes:
+    return struct.pack("<f", value)
 
 
 def serialize_int_enum(value_type: type, value: enum.IntEnum) -> bytes:
@@ -312,6 +320,7 @@ DESERIALIZERS: dict[type, DeserializerCallback] = {
     TLVStruct: deserialize_tlv_struct,
     abc.Sequence: deserialize_typing_sequence,
     bytes: deserialize_bytes,
+    float: deserialize_float,
 }
 
 SERIALIZERS: dict[type, SerializerCallback] = {
@@ -326,4 +335,5 @@ SERIALIZERS: dict[type, SerializerCallback] = {
     TLVStruct: serialize_tlv_struct,
     abc.Sequence: serialize_typing_sequence,
     bytes: serialize_bytes,
+    float: serialize_float,
 }

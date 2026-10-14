@@ -42,7 +42,8 @@ class StreamingStatus(TLVStruct):
 
 @dataclass
 class SessionControl(TLVStruct):
-    session: str = tlv_entry(1)
+    # 16-byte session identifier, shared with the Setup Endpoints handshake.
+    session: bytes = tlv_entry(1)
     command: SessionControlCommandValues = tlv_entry(2)
 
 
