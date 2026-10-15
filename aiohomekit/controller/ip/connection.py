@@ -630,6 +630,15 @@ class HomeKitConnection:
         # set keep-alive on the socket to ensure we detect dropped connections
         # since we don't send keep-alive packets ourselves
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        # The OS defaults probe after two idle hours: an accessory that dropped off the
+        # network would go unnoticed, and its events missed, for that long.
+        for option, value in (
+            (getattr(socket, "TCP_KEEPIDLE", getattr(socket, "TCP_KEEPALIVE", None)), 30),
+            (getattr(socket, "TCP_KEEPINTVL", None), 10),
+            (getattr(socket, "TCP_KEEPCNT", None), 3),
+        ):
+            if option is not None:
+                sock.setsockopt(socket.IPPROTO_TCP, option, value)
         self.transport, self.protocol = await loop.create_connection(
             lambda: InsecureHomeKitProtocol(self), sock=sock
         )
